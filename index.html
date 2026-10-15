@@ -310,7 +310,7 @@ const MAX_SET_BYTES = 230000;
 
 /* ---------- state ---------- */
 const S = { nodes: [], sets: {}, prog: {}, log: {} };
-const ui = { view: 'lib', folder: null, set: null, filter: 'all', shuffle: true, front: 'q', style: 'choice', examN: 20, query: '', cardQuery: '', modal: null, scope: null, dl: null };
+const ui = { view: 'lib', folder: null, set: null, filter: 'all', shuffle: false, front: 'q', style: 'choice', examN: 20, query: '', cardQuery: '', modal: null, scope: null, dl: null };
 let run = null, timer = null;
 
 /* ---------- storage: db(계정별 비공개) → localStorage → 메모리 ---------- */
