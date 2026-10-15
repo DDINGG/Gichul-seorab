@@ -271,6 +271,9 @@ body{margin:0}
 .hbtns{display:flex;align-items:center;gap:8px}
 .hbtns .btn{padding:4px 10px;font-size:12.5px}
 .hbtns{flex-wrap:wrap;justify-content:flex-end}
+.xh{font-size:15px;margin:18px 0 8px}
+.xtree{margin:4px 0 0;padding-left:18px;font-size:13px}.xtree ul{margin:2px 0}
+.xdet summary{cursor:pointer;font-size:13px;color:var(--muted)}
 .fld.vis label{display:flex;gap:8px;align-items:flex-start;line-height:1.4;margin:2px 0}
 .fld.vis input{width:auto;padding:0;border:0;background:transparent;margin-top:3px}
 </style>
@@ -355,16 +358,62 @@ const Pub = {
   async upsert(n, cards) { const { error } = await Store.sb.from('shared_sets').upsert({ id: n.pub, owner_id: Store.uid, name: n.name, cards, card_count: cards.length, updated_at: new Date().toISOString() }); if (error) throw error; },
   async remove(pid) { const { error } = await Store.sb.from('shared_sets').delete().eq('id', pid); if (error) throw error; },
   async list() { const { data, error } = await Store.sb.from('shared_sets').select('id,owner_id,owner_name,name,card_count,updated_at').order('updated_at', { ascending: false }).range(0, 499); if (error) throw error; return data; },
+  sentF: {},
+  async initF() { const { data } = await Store.sb.from('shared_folders').select('id').eq('owner_id', Store.uid); (data || []).forEach(r => { this.sentF[r.id] = ''; }); },
+  async upsertF(id, w) { const { error } = await Store.sb.from('shared_folders').upsert({ id, owner_id: Store.uid, name: w.name, tree: w.tree, set_count: w.sc, card_count: w.cc, updated_at: new Date().toISOString() }); if (error) throw error; },
+  async removeF(id) { const { error } = await Store.sb.from('shared_folders').delete().eq('id', id); if (error) throw error; },
+  async listF() { const { data, error } = await Store.sb.from('shared_folders').select('*').order('updated_at', { ascending: false }).range(0, 199); if (error) throw error; return data; },
+  async getMany(ids) { const { data, error } = await Store.sb.from('shared_sets').select('id,name,cards,owner_name').in('id', ids); if (error) throw error; return data; },
   async get(pid) { const { data, error } = await Store.sb.from('shared_sets').select('cards,name,owner_name').eq('id', pid).maybeSingle(); if (error) throw error; return data; }
 };
 function saveProfile() {
+  ensureDefaultPublic(); syncFolders();
   Store.later('profile', () => {
     const lim = today() - 120; Object.keys(S.log).forEach(k => { if (+k < lim) delete S.log[k]; });
     return Store.put('profile', '', { v: 1, nodes: S.nodes, log: S.log });
   }, 500);
 }
-function saveSet(id) { Store.later('set:' + id, () => S.sets[id] ? Store.put('set', id, { cards: S.sets[id].cards }) : null, 500); syncPub(id); }
-function syncPub(id) { const n = node(id); if (!n || !n.pub || !S.sets[id]) return; Store.later('pub:' + id, () => Pub.upsert(n, S.sets[id].cards), 800); }
+function saveSet(id) { Store.later('set:' + id, () => S.sets[id] ? Store.put('set', id, { cards: S.sets[id].cards }) : null, 500); if (ensureDefaultPublic()) saveProfile(); syncPub(id); }
+/* 기본은 공개. 비공개는 priv 표시로만 남긴다. 다른 사람에게서 저장한 사본(from)은 다시 공개하지 않는다. */
+function ensureDefaultPublic() {
+  let ch = false;
+  S.nodes.forEach(n => {
+    if (n.from || n.priv) return;
+    if (n.type === 'folder') { if (!n.fid) { n.fid = uuid4(); ch = true; } }
+    else if (!n.pub && S.sets[n.id] && setCards(n.id).length) { n.pub = uuid4(); ch = true; syncPub(n.id); }
+  });
+  return ch;
+}
+function setVis(id, pub) {
+  subtreeIds(id).forEach(i => {
+    const x = node(i); if (!x || x.from) return;
+    if (pub) delete x.priv;
+    else {
+      x.priv = true;
+      if (x.pub) { const pid = x.pub; delete x.pub; Store.cancel('pub:' + i); Store.queue('pubdel:' + pid, () => Pub.remove(pid)); }
+      delete x.fid;
+    }
+  });
+  ensureDefaultPublic();
+}
+const rootPub = n => n.type === 'folder' && n.fid && !n.priv && !path(n.id).slice(0, -1).some(a => a.fid && !a.priv);
+function buildTree(f) {
+  const out = []; let sc = 0, cc = 0;
+  kids(f.id).forEach(k => {
+    if (k.type === 'set') { if (k.pub && !k.priv) { const n = setCards(k.id).length; out.push({ t: 's', id: k.pub, name: k.name, n }); sc++; cc += n; } }
+    else if (!k.priv) { const r = buildTree(k); if (r) { out.push(r.node); sc += r.sc; cc += r.cc; } }
+  });
+  return out.length ? { node: { t: 'f', name: f.name, kids: out }, sc, cc } : null;
+}
+function syncFolders() {
+  Store.later('pubf', async () => {
+    const want = {};
+    S.nodes.filter(rootPub).forEach(f => { const r = buildTree(f); if (r) want[f.fid] = { name: f.name, tree: r.node, sc: r.sc, cc: r.cc }; });
+    for (const id of Object.keys(Pub.sentF)) if (!want[id]) { await Pub.removeF(id); delete Pub.sentF[id]; }
+    for (const [id, w] of Object.entries(want)) { const h = JSON.stringify(w); if (Pub.sentF[id] !== h) { await Pub.upsertF(id, w); Pub.sentF[id] = h; } }
+  }, 1200);
+}
+function syncPub(id) { const n = node(id); if (!n || !n.pub || !S.sets[id]) return; Store.later('pub:' + id, () => Pub.upsert(n, S.sets[id].cards), 800); syncFolders(); }
 function uuid4() { const b = crypto.getRandomValues(new Uint8Array(16)); b[6] = b[6] & 15 | 64; b[8] = b[8] & 63 | 128; const h = [...b].map(x => x.toString(16).padStart(2, '0')).join(''); return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20); }
 function saveProg(id) { Store.later('prog:' + id, () => { if (!S.sets[id]) return null; const p = P(id); return Store.put('prog', id, { c: p.c, star: p.star, best: p.best || null }); }, 700); }
 
@@ -497,7 +546,7 @@ function addTree(items, parent, fallbackName) {
   });
 }
 function restoreBackup(d) {
-  (d.nodes || []).forEach(n => { n = { ...n }; delete n.pub; const i = S.nodes.findIndex(x => x.id === n.id); if (i >= 0) S.nodes[i] = n; else S.nodes.push(n); });
+  (d.nodes || []).forEach(n => { n = { ...n }; delete n.pub; delete n.fid; const i = S.nodes.findIndex(x => x.id === n.id); if (i >= 0) S.nodes[i] = n; else S.nodes.push(n); });
   Object.entries(d.sets || {}).forEach(([id, s]) => { S.sets[id] = s; saveSet(id); });
   Object.entries(d.prog || {}).forEach(([id, p]) => { S.prog[id] = p; saveProg(id); });
   if (d.log) Object.entries(d.log).forEach(([k, v]) => { S.log[k] = Math.max(S.log[k] || 0, v); });
@@ -554,25 +603,43 @@ function libBody() {
   const fs = items.filter(n => n.type === 'folder'), ss = items.filter(n => n.type === 'set');
   return (fs.length ? `<div class="grid">${fs.map(folderTile).join('')}</div>` : '') + (ss.length ? `<div class="setlist">${ss.map(setRow).join('')}</div>` : '');
 }
+function treeHTML(t) { return `<ul class="xtree">${t.kids.map(k => k.t === 'f' ? `<li><b>${esc(k.name)}</b>${treeHTML(k)}</li>` : `<li>${esc(k.name)} <span class="muted">· ${k.n}장</span></li>`).join('')}</ul>`; }
+function treeIds(t) { return t.kids.flatMap(k => k.t === 'f' ? treeIds(k) : [k.id]); }
+const shortDate = s => { const d = new Date(s); return (d.getMonth() + 1) + '/' + d.getDate(); };
 function xRows() {
-  const q = norm(ui.xq || '');
-  const rows = (ui.xlist || []).filter(x => !q || norm(x.name + x.owner_name).includes(q));
-  if (!rows.length) return `<div class="empty">${ui.xlist && ui.xlist.length ? '검색 결과가 없어요.' : '아직 공개된 세트가 없어요.<br>내 세트의 설정에서 ‘공개’로 바꾸면 여기에 올라와요.'}</div>`;
-  return `<div class="setlist">${rows.map(x => {
+  const q = norm(ui.xq || ''), F = ui.xfold || [];
+  const inF = new Set(F.flatMap(f => treeIds(f.tree)));
+  const fr = F.filter(f => !q || norm(f.name + f.owner_name).includes(q));
+  const sr = (ui.xlist || []).filter(x => (q || !inF.has(x.id)) && (!q || norm(x.name + x.owner_name).includes(q)));
+  if (!fr.length && !sr.length) return `<div class="empty">${(ui.xlist && ui.xlist.length) || F.length ? '검색 결과가 없어요.' : '아직 공개된 세트가 없어요.<br>세트나 폴더를 만들면 기본으로 여기에 올라와요.'}</div>`;
+  let h = '';
+  if (fr.length) h += '<h2 class="xh">폴더</h2><div class="setlist">' + fr.map(f => {
+    const mine = f.owner_id === Store.uid;
+    return `<div class="setrow" style="cursor:default;flex-wrap:wrap"><div class="srmain"><div class="srname"><span class="chipd">폴더</span> ${esc(f.name)}</div><div class="dmeta">세트 ${f.set_count}개 · 카드 ${f.card_count} · ${esc(f.owner_name || '이름 없음')} · ${shortDate(f.updated_at)} 갱신</div></div>` +
+      (mine ? '<span class="dmeta">내가 올린 폴더</span>' : `<button class="btn primary sm" data-a="saveFolder" data-id="${f.id}">폴더째 저장</button>`) +
+      `<details class="xdet" style="flex-basis:100%"><summary>구성 보기</summary>${treeHTML(f.tree)}</details></div>`;
+  }).join('') + '</div>';
+  if (sr.length) h += '<h2 class="xh">세트</h2><div class="setlist">' + sr.map(x => {
     const mine = x.owner_id === Store.uid, saved = S.nodes.some(n => n.from === x.id);
-    const d = new Date(x.updated_at), ds = (d.getMonth() + 1) + '/' + d.getDate();
-    return `<div class="setrow" style="cursor:default"><div class="srmain"><div class="srname">${esc(x.name)}</div><div class="dmeta">카드 ${x.card_count} · ${esc(x.owner_name || '이름 없음')} · ${ds} 갱신</div></div>` +
+    return `<div class="setrow" style="cursor:default"><div class="srmain"><div class="srname">${esc(x.name)}</div><div class="dmeta">카드 ${x.card_count} · ${esc(x.owner_name || '이름 없음')} · ${shortDate(x.updated_at)} 갱신</div></div>` +
       (mine ? '<span class="dmeta">내가 올린 세트</span>' : saved ? '<span class="dmeta">저장됨</span>' : `<button class="btn primary sm" data-a="saveShared" data-id="${x.id}">내 서랍에 저장</button>`) + '</div>';
-  }).join('')}</div>`;
+  }).join('') + '</div>';
+  return h;
 }
 function vExplore() {
   let h = '<nav class="crumbs" aria-label="경로"><button data-a="home">서랍</button><span>/</span><span class="cur">공개 세트</span></nav>';
-  h += '<div class="titlerow"><h1>공개 세트</h1></div><p class="hint">스터디원이 공개한 세트예요. 저장하면 내 서랍에 사본이 생기고, 학습 기록은 나만 가져요. 원본을 고쳐도 내 사본은 바뀌지 않아요.</p>';
-  h += `<div class="toolrow"><input id="xq" class="search" type="search" placeholder="세트 이름 · 올린 사람 검색" value="${esc(ui.xq || '')}" aria-label="공개 세트 검색"></div>`;
+  h += '<div class="titlerow"><h1>공개 세트</h1></div><p class="hint">스터디원이 공개한 세트와 폴더예요. 저장하면 내 서랍에 사본이 생기고, 학습 기록은 나만 가져요. 원본을 고쳐도 내 사본은 바뀌지 않아요.</p>';
+  h += `<div class="toolrow"><input id="xq" class="search" type="search" placeholder="세트·폴더 이름 / 올린 사람 검색" value="${esc(ui.xq || '')}" aria-label="공개 세트 검색"></div>`;
   h += `<div id="xbody">${ui.xlist ? xRows() : (ui.xerr ? '<div class="empty">' + esc(ui.xerr) + '</div>' : '<div class="loading">불러오는 중…</div>')}</div>`;
   return h;
 }
-async function loadExplore() { try { ui.xlist = await Pub.list(); ui.xerr = ''; } catch (e) { ui.xlist = null; ui.xerr = '불러오지 못했어요: ' + ((e && e.message) || e); } if (ui.view === 'explore') render(); }
+async function loadExplore() { try { const [a, b] = await Promise.all([Pub.list(), Pub.listF()]); ui.xlist = a; ui.xfold = b; ui.xerr = ''; } catch (e) { ui.xlist = null; ui.xerr = '불러오지 못했어요: ' + ((e && e.message) || e); } if (ui.view === 'explore') render(); }
+function mSaveFolder(m) {
+  return `<form data-form="saveFolder"><h3>폴더째 저장</h3><p class="hint">${esc(m.owner || '')}님의 폴더 · 세트 ${m.sc}개 · 카드 ${m.cc}장</p>
+  <label class="fld"><span>폴더 이름</span><input name="name" value="${esc(m.name)}" required maxlength="80" autocomplete="off"></label>
+  <label class="fld"><span>저장할 위치</span><select name="parent">${folderOptions(null, ui.lastSaveFolder || '')}</select></label>
+  <div class="mfoot"><span class="sp"></span><button type="button" class="btn" data-a="closeModal">닫기</button><button class="btn primary">저장</button></div></form>`;
+}
 function mSaveShared(m) {
   return `<form data-form="saveShared"><h3>내 서랍에 저장</h3><p class="hint">${esc(m.owner || '')}님의 세트 · 카드 ${m.count}장</p>
   <label class="fld"><span>이름</span><input name="name" value="${esc(m.name)}" required maxlength="80" autocomplete="off"></label>
@@ -829,7 +896,7 @@ function mNode(m) {
   <label class="fld"><span>이름</span><input name="name" value="${esc(n ? n.name : '')}" required maxlength="80" autocomplete="off" placeholder="${isF ? '예: 상한론' : '예: 2024 중간고사 기출'}"></label>
   ${isF ? `<label class="fld"><span>시험일 (선택, 하루 권장량 계산에 써요)</span><input type="date" name="exam" value="${esc((n && n.exam) || '')}"></label>` : ''}
   ${n ? `<label class="fld"><span>위치</span><select name="parent">${folderOptions(n.id, n.parent)}</select></label>` : ''}
-  ${n && !isF && !n.from ? `<div class="fld vis"><span>공개 범위</span><label><input type="radio" name="vis" value="private" ${n.pub ? '' : 'checked'}> 비공개 — 나만 볼 수 있어요</label><label><input type="radio" name="vis" value="public" ${n.pub ? 'checked' : ''}> 공개 — 가입한 스터디원 모두가 보고 자기 서랍에 저장할 수 있어요 (학습 기록은 공유되지 않아요)</label></div>` : ''}
+  ${n && !n.from ? `<div class="fld vis"><span>공개 범위${isF ? ' (폴더 안의 모든 세트에 적용돼요)' : ''}</span><label><input type="radio" name="vis" value="public" ${n.priv ? '' : 'checked'}> 공개 — 가입한 스터디원 모두가 ‘공개 세트’에서 보고 자기 서랍에 저장할 수 있어요 (학습 기록은 공유되지 않아요)</label><label><input type="radio" name="vis" value="private" ${n.priv ? 'checked' : ''}> 비공개 — 나만 볼 수 있어요</label></div>` : ''}
   ${n && n.from ? `<p class="hint">${esc(n.fromName || '')}님이 공개한 세트를 저장한 사본이에요. 마음대로 고쳐도 원본은 바뀌지 않아요.</p>` : ''}
   ${n && !isF ? `<div style="margin-bottom:8px"><button type="button" class="btn sm" data-a="exportSet" data-id="${n.id}">이 세트 내보내기</button></div>` : ''}
   <div class="mfoot">${n ? '<button type="button" class="btn danger-ghost" data-a="delNode">삭제…</button>' : ''}<span class="sp"></span><button type="button" class="btn" data-a="closeModal">닫기</button><button class="btn primary">저장</button></div></form>`;
@@ -890,6 +957,7 @@ function modalHTML() {
   if (m.kind === 'card') return mCard(m);
   if (m.kind === 'import') return mImport(m);
   if (m.kind === 'saveShared') return mSaveShared(m);
+  if (m.kind === 'saveFolder') return mSaveFolder(m);
   if (m.kind === 'export') return mExport(m);
   if (m.kind === 'confirm') return `<h3>${esc(m.title)}</h3><p>${esc(m.body)}</p><div class="mfoot"><span class="sp"></span><button type="button" class="btn" data-a="closeModal">계속 풀기</button><button type="button" class="btn primary" data-a="${m.ok}">${esc(m.label)}</button></div>`;
   return '';
@@ -937,6 +1005,7 @@ function curStar(ref) { const p = P(ref.s), i = p.star.indexOf(ref.c.id); if (i 
 const A = {
   admin() { Gate.openAdmin(); },
   explore() { ui.view = 'explore'; ui.xq = ''; ui.xlist = null; ui.xerr = ''; go(); loadExplore(); },
+  saveFolder(t) { const f = (ui.xfold || []).find(r => r.id === t.dataset.id); if (!f) return; openModal({ kind: 'saveFolder', fid: f.id, name: f.name, owner: f.owner_name, sc: f.set_count, cc: f.card_count }); },
   saveShared(t) { const x = (ui.xlist || []).find(r => r.id === t.dataset.id); if (!x) return; openModal({ kind: 'saveShared', pid: x.id, name: x.name, owner: x.owner_name, count: x.card_count }); },
   logout() { Store.flushAll(); setTimeout(() => Gate.signOut(), 400); },
   home() { ui.view = 'lib'; ui.folder = null; ui.query = ''; go(); },
@@ -1029,6 +1098,19 @@ const A = {
 };
 
 const FORMS = {
+  async saveFolder(fd) {
+    const m = ui.modal, f = (ui.xfold || []).find(r => r.id === m.fid), name = String(fd.get('name') || '').trim(); if (!f || !name) return;
+    let rows; try { rows = await Pub.getMany(treeIds(f.tree)); } catch (e) { toast('불러오지 못했어요'); return; }
+    const by = Object.fromEntries(rows.map(r => [r.id, r])); let made = 0;
+    const parent = fd.get('parent') || null; ui.lastSaveFolder = parent || '';
+    const mk = (t, pid, nm) => {
+      if (t.t === 'f') { const fn = addFolder(pid, nm || t.name); t.kids.forEach(k => mk(k, fn.id)); return; }
+      const d = by[t.id]; if (!d) return;
+      const n = { id: uid(), type: 'set', parent: pid, name: t.name, order: Date.now() + S.nodes.length, from: t.id, fromName: d.owner_name || f.owner_name || '' };
+      S.nodes.push(n); S.sets[n.id] = { cards: clone(d.cards) }; saveSet(n.id); made++;
+    };
+    mk(f.tree, parent, name); saveProfile(); closeModal(); render(); toast(`세트 ${made}개를 내 서랍에 저장했어요`);
+  },
   async saveShared(fd) {
     const m = ui.modal, name = String(fd.get('name') || '').trim(); if (!name) return;
     let d; try { d = await Pub.get(m.pid); } catch (e) { toast('불러오지 못했어요'); return; }
@@ -1048,9 +1130,9 @@ const FORMS = {
       if (n.type === 'folder') { const ex = fd.get('exam'); if (ex) n.exam = ex; else delete n.exam; }
       if (fd.get('parent') != null) n.parent = fd.get('parent') || null;
       const vis = fd.get('vis'); let msg = '';
-      if (n.type === 'set' && !n.from && vis) {
-        if (vis === 'public' && !n.pub) { n.pub = uuid4(); msg = '공개했어요. 스터디원이 볼 수 있어요'; }
-        else if (vis === 'private' && n.pub) { const pid = n.pub; delete n.pub; Store.cancel('pub:' + n.id); Store.queue('pubdel:' + pid, () => Pub.remove(pid)); msg = '비공개로 바꿨어요'; }
+      if (vis && !n.from) {
+        const was = !n.priv, now = vis === 'public';
+        if (was !== now) { setVis(n.id, now); msg = now ? (n.type === 'folder' ? '폴더 안의 세트를 모두 공개했어요' : '공개했어요. 스터디원이 볼 수 있어요') : (n.type === 'folder' ? '폴더 안의 세트를 모두 비공개로 바꿨어요' : '비공개로 바꿨어요'); }
       }
       if (n.pub) syncPub(n.id);
       saveProfile(); closeModal(); render(); if (msg) toast(msg);
@@ -1152,6 +1234,8 @@ async function main() {
       S.nodes = d.prof.nodes || []; S.log = d.prof.log || {}; S.sets = d.sets; S.prog = d.prog;
       S.nodes.filter(n => n.type === 'set').forEach(n => { if (!S.sets[n.id]) S.sets[n.id] = { cards: [] }; });
     } else seedData();
+    try { await Pub.initF(); } catch (e) { console.warn(e); }
+    if (ensureDefaultPublic()) saveProfile(); else syncFolders();
     Store.refresh(); render();
   } catch (e) {
     console.error(e);
