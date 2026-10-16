@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>기출 서랍</title>
+<title>서랍</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@600;700&display=swap">
+<script>try{var t=localStorage.getItem("gj:theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <style>
 /* 레이아웃: 한약장 서랍. 폴더는 이름표가 붙은 서랍, 세트는 서랍 속 목록, 학습 화면은 가운데 카드 한 장. 색은 청자빛 회색 바탕에 쪽빛 포인트, 알아요/몰라요만 의미색. */
 :root{
@@ -253,6 +254,11 @@ pre.sample{overflow:auto;background:var(--bg);border:1px solid var(--line);borde
 }
 
 html{color-scheme:light dark}
+:root[data-theme="light"]{color-scheme:light}
+.chrow input[type=checkbox]{flex:none;width:18px;height:18px;padding:0;accent-color:var(--accent)}
+.hint{font-size:13px;color:var(--muted,#888);margin:2px 0 8px}
+.resume{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid var(--accent);border-radius:12px;padding:10px 12px;margin:0 0 12px}
+.resume b{flex:1 1 180px;min-width:0}
 [hidden]{display:none!important}
 img{max-width:100%}
 body{margin:0}
@@ -303,13 +309,18 @@ const CIRC = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩'];
 const INTERVAL = [0, 1, 3, 7, 14, 30];
 const norm = s => String(s || '').toLowerCase().replace(/[\s·,.;:()\[\]{}\-_\/~'"`]/g, '');
 const clip = (s, n) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
-const isMCQ = c => !!(c.ch && c.ch.length >= 2 && c.ans != null);
-const plainAns = c => isMCQ(c) ? c.ch[c.ans] : (c.a || '');
-const ansText = c => isMCQ(c) ? CIRC[c.ans] + ' ' + c.ch[c.ans] : (c.a || '');
+const ansArr = c => Array.isArray(c.ans) ? c.ans : (c.ans != null ? [c.ans] : []);
+const isMCQ = c => !!(c.ch && c.ch.length >= 2 && ansArr(c).length);
+const plainAns = c => isMCQ(c) ? ansArr(c).map(i => c.ch[i]).join(' / ') : (c.a || '');
+const ansText = c => isMCQ(c) ? ansArr(c).map(i => CIRC[i] + ' ' + c.ch[i]).join(' / ') : (c.a || '');
+const sameSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
+const THEMES = { system: '◐ 시스템', light: '☀ 라이트', dark: '☾ 다크' };
+const getTheme = () => { try { const t = localStorage.getItem('gj:theme'); return t === 'light' || t === 'dark' ? t : 'system'; } catch (e) { return 'system'; } };
+function setTheme(t) { try { if (t === 'system') localStorage.removeItem('gj:theme'); else localStorage.setItem('gj:theme', t); } catch (e) {} if (t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); }
 const MAX_SET_BYTES = 230000;
 
 /* ---------- state ---------- */
-const S = { nodes: [], sets: {}, prog: {}, log: {} };
+const S = { nodes: [], sets: {}, prog: {}, log: {}, resume: {} };
 const ui = { view: 'lib', folder: null, set: null, filter: 'all', shuffle: false, front: 'q', style: 'choice', examN: 20, query: '', cardQuery: '', modal: null, scope: null, dl: null };
 let run = null, timer = null;
 
@@ -370,8 +381,38 @@ function saveProfile() {
   ensureDefaultPublic(); syncFolders();
   Store.later('profile', () => {
     const lim = today() - 120; Object.keys(S.log).forEach(k => { if (+k < lim) delete S.log[k]; });
-    return Store.put('profile', '', { v: 1, nodes: S.nodes, log: S.log });
+    return Store.put('profile', '', { v: 1, nodes: S.nodes, log: S.log, resume: S.resume });
   }, 500);
+}
+/* ---------- 플래시카드 이어하기 ---------- */
+const rkey = sc => sc.type + ':' + (sc.id || '');
+const rid = ref => ref.s + '|' + ref.c.id;
+function saveResume() {
+  const r = run, sc = ui.scope; if (!r || r.kind !== 'flash' || !sc) return;
+  S.resume = S.resume || {};
+  if (r.i >= r.refs.length) delete S.resume[rkey(sc)];
+  else S.resume[rkey(sc)] = { t: Date.now(), f: ui.filter, round: r.round, front: r.front, i: r.i, order: r.refs.map(rid), res: r.hist.map(h => [h.ok ? 1 : 0, h.prev || 0]) };
+  const ks = Object.keys(S.resume).sort((a, b) => S.resume[b].t - S.resume[a].t); ks.slice(10).forEach(k => delete S.resume[k]);
+  Store.later('profile', () => Store.put('profile', '', { v: 1, nodes: S.nodes, log: S.log, resume: S.resume }), 800);
+}
+function clearResume(sc) { if (sc && S.resume && S.resume[rkey(sc)]) { delete S.resume[rkey(sc)]; saveProfile(); } }
+function resumeFlash(scope) {
+  const rs = S.resume && S.resume[rkey(scope)]; if (!rs) return false;
+  const all = scopeRefs(scope), map = new Map(all.map(r => [rid(r), r]));
+  const refs = [], know = [], dont = [], hist = [];
+  rs.order.forEach((k, idx) => {
+    const ref = map.get(k); if (!ref) return;
+    refs.push(ref);
+    if (idx < rs.i && rs.res[idx]) { const [ok, prev] = rs.res[idx]; (ok ? know : dont).push(ref); hist.push({ ref, ok: !!ok, prev: prev || null }); }
+  });
+  const i = hist.length; if (!refs.length || i >= refs.length) { clearResume(scope); return false; }
+  ui.scope = scope; if (scope.type === 'set') ui.set = scope.id;
+  run = { kind: 'flash', round: rs.round || 1, all: applyFilter(all, rs.f || 'all'), refs, i, know, dont, hist, flip: false, front: rs.front || 'q', busy: false };
+  ui.view = 'flash'; go(); return true;
+}
+function resumeBox(scope) {
+  const rs = S.resume && S.resume[rkey(scope)]; if (!rs) return '';
+  return `<div class="resume"><b>플래시카드 이어하기 · ${rs.i} / ${rs.order.length}${rs.round > 1 ? ' · ' + rs.round + '회차' : ''}</b><button class="btn primary" data-a="resumeFlash" data-sc="${rkey(scope)}">이어서 하기</button><button class="btn" data-a="dropResume" data-sc="${rkey(scope)}">버리기</button></div>`;
 }
 function saveSet(id) { Store.later('set:' + id, () => S.sets[id] ? Store.put('set', id, { cards: S.sets[id].cards }) : null, 500); if (ensureDefaultPublic()) saveProfile(); syncPub(id); }
 /* 기본은 공개. 비공개는 priv 표시로만 남긴다. 다른 사람에게서 저장한 사본(from)은 다시 공개하지 않는다. */
@@ -475,9 +516,11 @@ function normCard(c) {
   let a = String(c.a ?? c.back ?? c.definition ?? '').trim(), ans = null;
   const A = c.answer ?? c.ans;
   if (ch.length >= 2) {
-    if (typeof A === 'number') ans = A - 1;
-    else if (typeof A === 'string') { const t = A.trim(); const i = ch.findIndex(x => x === t); if (i >= 0) ans = i; else if (/^\d+$/.test(t)) ans = +t - 1; else if (!a) a = t; }
-    if (ans != null && (ans < 0 || ans >= ch.length)) ans = null;
+    const CI = '①②③④⑤⑥⑦⑧⑨⑩';
+    if (typeof A === 'number') ans = [A - 1];
+    else if (Array.isArray(A)) ans = A.map(x => typeof x === 'number' ? x - 1 : /^\d+$/.test(String(x).trim()) ? +String(x).trim() - 1 : ch.findIndex(y => y === String(x).trim()));
+    else if (typeof A === 'string') { const t = A.trim(); const i = ch.findIndex(x => x === t); if (i >= 0) ans = [i]; else if (/^[\d\s,，、·&]+$/.test(t)) ans = t.split(/[^\d]+/).filter(Boolean).map(x => +x - 1); else if (t && [...t].every(k => CI.includes(k) || /[\s,，、·&]/.test(k))) ans = [...t].filter(k => CI.includes(k)).map(k => CI.indexOf(k)); else if (!a) a = t; }
+    if (ans) { ans = [...new Set(ans)].filter(i => Number.isInteger(i) && i >= 0 && i < ch.length).sort((x, y) => x - y); ans = ans.length === 0 ? null : ans.length === 1 ? ans[0] : ans; }
   } else { ch = []; if (A != null && !a) a = String(A).trim(); }
   return { id: uid(), q, ch, ans, a, exp: String(c.exp ?? c.explanation ?? c.note ?? '').trim(), src: String(c.src ?? c.source ?? '').trim() };
 }
@@ -555,7 +598,7 @@ function restoreBackup(d) {
 const flat1 = s => String(s || '').replace(/\s*\n\s*/g, ' / ').replace(/\t/g, ' ');
 function exportSetJSON(id) {
   const n = node(id);
-  return JSON.stringify({ name: n ? n.name : '세트', cards: setCards(id).map(c => { const o = { q: c.q }; if (c.ch.length) { o.choices = c.ch; if (c.ans != null) o.answer = c.ans + 1; } if (c.a) o.a = c.a; if (c.exp) o.explanation = c.exp; if (c.src) o.source = c.src; return o; }) }, null, 2);
+  return JSON.stringify({ name: n ? n.name : '세트', cards: setCards(id).map(c => { const o = { q: c.q }; if (c.ch.length) { o.choices = c.ch; if (c.ans != null) o.answer = Array.isArray(c.ans) ? c.ans.map(x => x + 1) : c.ans + 1; } if (c.a) o.a = c.a; if (c.exp) o.explanation = c.exp; if (c.src) o.source = c.src; return o; }) }, null, 2);
 }
 function exportSetTSV(id) {
   return setCards(id).map(c => { const q = c.ch.length ? c.q + ' ' + c.ch.map((t, i) => CIRC[i] + ' ' + t).join(' ') : c.q; return [flat1(q), flat1(ansText(c)), flat1(c.exp)].join('\t'); }).join('\n');
@@ -567,7 +610,7 @@ function seedData() { S.nodes.push({ id: 'fmid', type: 'folder', parent: null, n
 
 /* ---------- 화면 조각 ---------- */
 const LOGO = '<svg viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="3" width="21" height="6" rx="1.5"/><rect x="2.5" y="10" width="21" height="6" rx="1.5"/><rect x="2.5" y="17" width="21" height="6" rx="1.5"/><path d="M10.5 6h5M10.5 13h5M10.5 20h5" stroke-linecap="round"/></svg>';
-function header() { return `<header class="bar"><button class="brand" data-a="home" aria-label="서랍 처음으로">${LOGO}<span>기출 서랍</span></button><span class="hbtns"><span id="save" class="save ${Store.cls}">${SAVE_TXT[Store.cls]}</span><button class="btn" data-a="explore">공개 세트</button>${Gate.isAdmin ? '<button class="btn" data-a="admin">관리</button>' : ''}<button class="btn" data-a="logout" title="${esc(Gate.email || '')}">로그아웃</button></span></header>`; }
+function header() { return `<header class="bar"><button class="brand" data-a="home" aria-label="서랍 처음으로">${LOGO}<span>서랍</span></button><span class="hbtns"><span id="save" class="save ${Store.cls}">${SAVE_TXT[Store.cls]}</span><button class="btn" data-a="theme" title="화면 테마 바꾸기">${THEMES[getTheme()]}</button><button class="btn" data-a="explore">공개 세트</button>${Gate.isAdmin ? '<button class="btn" data-a="admin">관리</button>' : ''}<button class="btn" data-a="logout" title="${esc(Gate.email || '')}">로그아웃</button></span></header>`; }
 function mbar(st) {
   const n = st.n || 1, seg = (k, c) => st[k] ? `<i style="width:${st[k] / n * 100}%;background:var(${c})"></i>` : '';
   return `<div class="mbar" role="img" aria-label="숙달 ${Math.round(st.mastered / n * 100)}%">${seg('mastered', '--know')}${seg('learning', '--accent')}${seg('dont', '--dont')}</div>`;
@@ -652,7 +695,7 @@ function studyPanel(scope) {
   const cnt = { all: st.n, dont: st.dont, due: st.due, new: st.new, star: st.star, hot: refs.filter(r => /빈출/.test(r.c.src)).length };
   const chips = [['all', '전체'], ['hot', '빈출'], ['dont', '모르는 것'], ['due', '복습 예정'], ['new', '안 본 것'], ['star', '★ 별표']].map(([k, l]) => `<button class="chip ${ui.filter === k ? 'on' : ''}" data-a="setFilter" data-f="${k}">${l}<b>${cnt[k]}</b></button>`).join('');
   const sc = scope.type + ':' + (scope.id || '');
-  return `<section class="panel"><h2>학습하기</h2><div class="chips">${chips}</div>
+  return `<section class="panel"><h2>학습하기</h2>${resumeBox(scope)}<div class="chips">${chips}</div>
   <div class="optgrid">
    <div class="opt"><span class="lbl">순서</span>${seg2('shuffle', ui.shuffle ? 1 : 0, [[1, '섞기'], [0, '순서대로']])}</div>
    <div class="opt"><span class="lbl">앞면</span>${seg2('front', ui.front, [['q', '문제'], ['a', '정답']])}</div>
@@ -702,7 +745,7 @@ function vSet() {
 function face(c, side) {
   if (side === 'q') return `${srcHTML(c)}<div class="qtext">${esc(c.q)}</div>${c.ch.length ? `<ol class="chlist">${c.ch.map((t, i) => `<li><span class="cn">${CIRC[i]}</span><span>${esc(t)}</span></li>`).join('')}</ol>` : ''}`;
   let h = '';
-  if (isMCQ(c)) h += `<div class="ans"><span class="cn">${CIRC[c.ans]}</span><span>${esc(c.ch[c.ans])}</span></div>`;
+  if (isMCQ(c)) ansArr(c).forEach(i => { h += `<div class="ans"><span class="cn">${CIRC[i]}</span><span>${esc(c.ch[i])}</span></div>`; });
   if (c.a) h += `<div class="ans${isMCQ(c) ? ' sub' : ''}">${esc(c.a)}</div>`;
   if (!isMCQ(c) && !c.a) h += '<div class="muted">정답이 입력되지 않았어요.</div>';
   if (c.exp) h += `<div class="exp"><span class="lbl">해설</span>${esc(c.exp)}</div>`;
@@ -736,12 +779,12 @@ function swipe(ok) {
 function commitFlash(ok) {
   const r = run; if (!r || r.kind !== 'flash') return; const ref = r.refs[r.i];
   const prev = record(ref, ok); (ok ? r.know : r.dont).push(ref); r.hist.push({ ref, ok, prev });
-  r.i++; r.flip = false; r.busy = false;
+  r.i++; r.flip = false; r.busy = false; saveResume();
   if (r.i >= r.refs.length) { r.result = { kind: 'flash', round: r.round, total: r.refs.length, good: r.know, bad: r.dont }; ui.view = 'result'; go(); } else render();
 }
 function undoFlash() {
   const r = run; if (!r || r.busy || !r.hist.length) return; const h = r.hist.pop();
-  unrecord(h.ref, h.prev); (h.ok ? r.know : r.dont).pop(); r.i--; r.flip = false; render();
+  unrecord(h.ref, h.prev); (h.ok ? r.know : r.dont).pop(); r.i--; r.flip = false; saveResume(); render();
 }
 function bindFlash() {
   const fc = $('#fc'); if (!fc) return; const stk = $('#stk'), std = $('#std');
@@ -768,10 +811,10 @@ function makeItems(refs) {
   if (pool.length < 4) pool = [...new Set(scopeRefs({ type: 'all' }).map(r => plainAns(r.c)).filter(Boolean))];
   return refs.map(ref => {
     const c = ref.c;
-    if (isMCQ(c)) return { ref, type: 'mcq', choices: c.ch.slice(), correct: c.ans };
+    if (isMCQ(c)) return { ref, type: 'mcq', choices: c.ch.slice(), correct: ansArr(c) };
     if (c.a && ui.style === 'choice') {
       const dis = shuffle(pool.filter(t => norm(t) !== norm(c.a))).slice(0, 3);
-      if (dis.length >= 3) { const ch = shuffle([c.a, ...dis]); return { ref, type: 'mcq', choices: ch, correct: ch.indexOf(c.a), gen: true }; }
+      if (dis.length >= 3) { const ch = shuffle([c.a, ...dis]); return { ref, type: 'mcq', choices: ch, correct: [ch.indexOf(c.a)], gen: true }; }
     }
     if (c.a) return { ref, type: 'write' };
     return null;
@@ -785,8 +828,10 @@ function startQuiz(refs, exam, all) {
   run = { kind: 'quiz', exam, all: all || refs, items, i: 0, st: items.map(() => ({})) };
   ui.view = 'quiz'; go();
 }
+const corrText = it => it.correct.map(i => CIRC[i] + ' ' + it.choices[i]).join(' / ');
+const picksOf = s => s.picks || [];
 function feedback(it, s) {
-  const c = it.ref.c, corr = it.type === 'mcq' ? CIRC[it.correct] + ' ' + it.choices[it.correct] : c.a;
+  const c = it.ref.c, corr = it.type === 'mcq' ? corrText(it) : c.a;
   let h = `<div class="fb ${s.ok ? 'ok' : 'no'}"><div class="fbh">${s.ok ? '정답입니다' : '오답입니다'}</div>`;
   if (!s.ok || it.type === 'write') h += `<div class="fbl"><span>정답</span>${esc(corr)}</div>`;
   if (it.type === 'write' && !s.ok && s.text) h += `<div class="fbl"><span>내 답</span>${esc(s.text)}</div>`;
@@ -797,16 +842,19 @@ function feedback(it, s) {
 }
 function vQuiz() {
   const r = run, it = r.items[r.i], s = r.st[r.i], c = it.ref.c, n = r.items.length;
-  const ansd = i => { const x = r.st[i]; return !!(x.done || x.pick != null || (x.text || '').trim()); };
+  const ansd = i => { const x = r.st[i]; return !!(x.done || picksOf(x).length || (x.text || '').trim()); };
   const cnt = r.st.filter((x, i) => ansd(i)).length;
   let body = `<div class="qcard">${srcHTML(c)}<div class="qtext">${esc(c.q)}</div>`;
   if (it.type === 'mcq') {
+    const multi = it.correct.length > 1, pk = picksOf(s);
+    if (multi) body += `<p class="hint">정답이 ${it.correct.length}개예요. 모두 고르세요${r.exam ? '' : ' (고른 뒤 확인)'}.</p>`;
     body += `<div class="choices">${it.choices.map((t, i) => {
       let cls = 'choice';
-      if (r.exam) { if (s.pick === i) cls += ' sel'; }
-      else if (s.done) { if (i === it.correct) cls += ' right'; else if (i === s.pick) cls += ' wrong'; else cls += ' dim'; }
+      if (r.exam || !s.done) { if (pk.includes(i)) cls += ' sel'; }
+      else if (s.done) { if (it.correct.includes(i)) cls += ' right'; else if (pk.includes(i)) cls += ' wrong'; else cls += ' dim'; }
       return `<button class="${cls}" data-a="pick" data-i="${i}" ${!r.exam && s.done ? 'disabled' : ''}><span class="cn">${CIRC[i]}</span><span>${esc(t)}</span></button>`;
     }).join('')}</div>`;
+    if (multi && !r.exam && !s.done) body += `<div class="wrow"><button class="btn primary" data-a="confirmPick" ${pk.length ? '' : 'disabled'}>확인</button></div>`;
   } else {
     body += `<div class="wrow"><input id="wa" class="winput" data-in="wa" value="${esc(s.text || '')}" placeholder="정답을 입력하세요" autocomplete="off" ${!r.exam && s.done ? 'disabled' : ''}>${!r.exam && !s.done ? '<button class="btn primary" data-a="submitText">확인</button>' : ''}</div>`;
   }
@@ -829,7 +877,7 @@ function gradeExam() {
   ui.modal = null; renderModal(); const r = run;
   r.items.forEach((it, i) => {
     const s = r.st[i], c = it.ref.c; let answered = false, ok = false;
-    if (it.type === 'mcq') { answered = s.pick != null; ok = s.pick === it.correct; }
+    if (it.type === 'mcq') { answered = picksOf(s).length > 0; ok = sameSet(picksOf(s), it.correct); }
     else { const v = (s.text || '').trim(); answered = !!v; ok = answered && norm(v) === norm(c.a); }
     s.ok = ok; s.done = true; if (answered) s.prev = record(it.ref, ok);
   });
@@ -866,8 +914,8 @@ function vResult() {
   if (R.kind === 'quiz') {
     const g = R.good.length, pct = Math.round(g / R.total * 100);
     const wr = R.wrong.map(({ it, s }) => {
-      const c = it.ref.c, mine = it.type === 'mcq' ? (s.pick != null ? CIRC[s.pick] + ' ' + it.choices[s.pick] : '') : (s.text || '');
-      const corr = it.type === 'mcq' ? CIRC[it.correct] + ' ' + it.choices[it.correct] : c.a;
+      const c = it.ref.c, mine = it.type === 'mcq' ? picksOf(s).slice().sort((x, y) => x - y).map(i => CIRC[i] + ' ' + it.choices[i]).join(' / ') : (s.text || '');
+      const corr = it.type === 'mcq' ? corrText(it) : c.a;
       return `<article class="wcard">${srcHTML(c)}<div class="qtext">${esc(c.q)}</div><div class="mine">${mine ? '내 답: ' + esc(mine) : '미응답'}</div><div class="ans">정답: ${esc(corr)}</div>${c.exp ? `<div class="exp"><span class="lbl">해설</span>${esc(c.exp)}</div>` : ''}</article>`;
     }).join('');
     return `<section class="study result"><h2 class="rtitle">${R.exam ? '모의시험 결과' : '퀴즈 결과'}</h2>
@@ -905,10 +953,10 @@ function mCard(m) {
   const cs = setCards(m.set), c = m.idx != null ? cs[m.idx] : { q: '', ch: [], ans: null, a: '', exp: '', src: '' };
   if (m.confirmDel) return `<h3>카드를 삭제할까요?</h3><p class="warn">${esc(clip(c.q, 80))}</p><div class="mfoot"><span class="sp"></span><button type="button" class="btn" data-a="cancelDel">취소</button><button type="button" class="btn danger" data-a="delCard">삭제</button></div>`;
   const nrow = Math.min(10, Math.max(5, c.ch.length));
-  const rows = Array.from({ length: nrow }, (_, i) => `<div class="chrow"><input type="radio" name="ans" value="${i}" ${c.ans === i ? 'checked' : ''} aria-label="${i + 1}번을 정답으로"><span class="cn">${CIRC[i]}</span><input type="text" name="c${i}" value="${esc(c.ch[i] || '')}" placeholder="보기 ${i + 1}" autocomplete="off"></div>`).join('');
+  const rows = Array.from({ length: nrow }, (_, i) => `<div class="chrow"><input type="checkbox" name="ans" value="${i}" ${ansArr(c).includes(i) ? 'checked' : ''} aria-label="${i + 1}번을 정답으로"><span class="cn">${CIRC[i]}</span><input type="text" name="c${i}" value="${esc(c.ch[i] || '')}" placeholder="보기 ${i + 1}" autocomplete="off"></div>`).join('');
   return `<form data-form="card"><h3>${m.idx != null ? '카드 수정' : '카드 추가'}</h3>
   <label class="fld"><span>문제</span><textarea name="q" rows="3" required>${esc(c.q)}</textarea></label>
-  <div class="fld"><span>보기 (객관식일 때만) · 정답 번호를 선택하세요</span>${rows}</div>
+  <div class="fld"><span>보기 (객관식일 때만) · 정답 번호를 체크하세요 (여러 개 가능)</span>${rows}</div>
   <label class="fld"><span>정답 (단답형일 때, 또는 보기 정답에 덧붙일 말)</span><textarea name="a" rows="2">${esc(c.a)}</textarea></label>
   <label class="fld"><span>해설</span><textarea name="exp" rows="3">${esc(c.exp)}</textarea></label>
   <label class="fld"><span>출처 (선택)</span><input name="src" value="${esc(c.src)}" placeholder="예: 2023 중간 12번" autocomplete="off"></label>
@@ -1004,6 +1052,7 @@ function curStar(ref) { const p = P(ref.s), i = p.star.indexOf(ref.c.id); if (i 
 
 const A = {
   admin() { Gate.openAdmin(); },
+  theme() { const o = ['system', 'light', 'dark']; setTheme(o[(o.indexOf(getTheme()) + 1) % 3]); render(); toast('테마: ' + THEMES[getTheme()].slice(2)); },
   explore() { ui.view = 'explore'; ui.xq = ''; ui.xlist = null; ui.xerr = ''; go(); loadExplore(); },
   saveFolder(t) { const f = (ui.xfold || []).find(r => r.id === t.dataset.id); if (!f) return; openModal({ kind: 'saveFolder', fid: f.id, name: f.name, owner: f.owner_name, sc: f.set_count, cc: f.card_count }); },
   saveShared(t) { const x = (ui.xlist || []).find(r => r.id === t.dataset.id); if (!x) return; openModal({ kind: 'saveShared', pid: x.id, name: x.name, owner: x.owner_name, count: x.card_count }); },
@@ -1023,6 +1072,7 @@ const A = {
   opt(t) { const k = t.dataset.k, v = t.dataset.v; ui[k] = k === 'examN' ? +v : k === 'shuffle' ? v === '1' : v; render(); },
   startMode(t) {
     const [type, id] = t.dataset.sc.split(':'); const scope = { type, id: id || null };
+    if (t.dataset.m === 'flash') clearResume(scope);
     const refs = applyFilter(scopeRefs(scope), ui.filter);
     if (!refs.length) { toast('이 조건에 맞는 카드가 없어요'); return; }
     startSession(t.dataset.m, refs, scope);
@@ -1030,7 +1080,9 @@ const A = {
   quickStudy(t) { const scope = { type: 'set', id: t.dataset.id }, refs = scopeRefs(scope); if (!refs.length) { toast('카드가 없어요. 먼저 카드를 추가하세요'); return; } ui.set = t.dataset.id; startSession('flash', refs, scope); },
   reviewDue() { const scope = { type: 'all' }, refs = scopeRefs(scope).filter(isDue); if (!refs.length) return; startSession('flash', refs, scope); },
   exitStudy() { stopTimer(); const sc = ui.scope; ui.view = sc && sc.type === 'set' && node(sc.id) ? 'set' : 'lib'; if (ui.view === 'set') ui.set = sc.id; else if (sc && sc.type === 'folder') ui.folder = sc.id; go(); },
-  toggleFront() { if (!run) return; run.front = run.front === 'q' ? 'a' : 'q'; run.flip = false; render(); },
+  toggleFront() { if (!run) return; run.front = run.front === 'q' ? 'a' : 'q'; run.flip = false; if (run.kind === 'flash') saveResume(); render(); },
+  resumeFlash(t) { const [type, id] = t.dataset.sc.split(':'); if (!resumeFlash({ type, id: id || null })) toast('이어할 기록이 없어요'); },
+  dropResume(t) { const [type, id] = t.dataset.sc.split(':'); clearResume({ type, id: id || null }); render(); },
   reveal() { flipCard(); }, swipeL() { swipe(false); }, swipeR() { swipe(true); }, undo() { undoFlash(); },
   starCur() { const r = run; if (r && r.kind === 'flash') { curStar(r.refs[r.i]); render(); } },
   retryBad() { const R = run.result; if (R.kind === 'flash') startFlash(R.bad, R.round + 1, run.all); else if (R.kind === 'quiz') startQuiz(R.bad, false, run.all); },
@@ -1039,8 +1091,17 @@ const A = {
   flashBad() { startFlash(run.result.bad, 1, run.all); },
   pick(t) {
     const r = run; if (!r || r.kind !== 'quiz') return; const i = +t.dataset.i, s = r.st[r.i], it = r.items[r.i];
-    if (r.exam) { s.pick = s.pick === i ? null : i; render(); return; }
-    if (s.done) return; s.pick = i; s.done = true; s.ok = i === it.correct; s.prev = record(it.ref, s.ok); render();
+    const multi = it.correct.length > 1, pk = picksOf(s).slice();
+    if (r.exam || multi) {
+      if (s.done) return;
+      s.picks = multi ? (pk.includes(i) ? pk.filter(x => x !== i) : pk.concat(i)) : (pk.includes(i) ? [] : [i]);
+      render(); return;
+    }
+    if (s.done) return; s.picks = [i]; s.done = true; s.ok = it.correct.includes(i); s.prev = record(it.ref, s.ok); render();
+  },
+  confirmPick() {
+    const r = run; if (!r || r.kind !== 'quiz' || r.exam) return; const s = r.st[r.i], it = r.items[r.i]; if (s.done || !picksOf(s).length) return;
+    s.done = true; s.ok = sameSet(picksOf(s), it.correct); s.prev = record(it.ref, s.ok); render();
   },
   submitText() {
     const r = run; if (!r || r.kind !== 'quiz' || r.exam) return; const s = r.st[r.i], it = r.items[r.i]; if (s.done) return;
@@ -1051,7 +1112,7 @@ const A = {
   nextQ() { const r = run, n = r.items.length; if (r.i < n - 1) { r.i++; render(); window.scrollTo(0, 0); } else if (!r.exam) finishQuiz(); },
   prevQ() { if (run.i > 0) { run.i--; render(); window.scrollTo(0, 0); } },
   jump(t) { run.i = +t.dataset.i; render(); window.scrollTo(0, 0); },
-  submitExam() { const r = run, u = r.st.filter((x, i) => !(x.pick != null || (x.text || '').trim())).length; if (u) openModal({ kind: 'confirm', title: '제출할까요?', body: `아직 풀지 않은 문항이 ${u}개 있어요. 풀지 않은 문항은 오답으로 채점돼요.`, ok: 'gradeExam', label: '제출' }); else gradeExam(); },
+  submitExam() { const r = run, u = r.st.filter((x, i) => !(picksOf(x).length || (x.text || '').trim())).length; if (u) openModal({ kind: 'confirm', title: '제출할까요?', body: `아직 풀지 않은 문항이 ${u}개 있어요. 풀지 않은 문항은 오답으로 채점돼요.`, ok: 'gradeExam', label: '제출' }); else gradeExam(); },
   gradeExam() { gradeExam(); },
   tile(t) {
     const r = run; if (!r || r.kind !== 'match' || r.lock) return; const i = +t.dataset.i;
@@ -1141,8 +1202,9 @@ const FORMS = {
   card(fd, f, e) {
     const m = ui.modal, q = String(fd.get('q') || '').trim(); if (!q) return;
     const raw = []; for (let i = 0; i < 10; i++) { const v = fd.get('c' + i); if (v == null) break; raw.push(String(v).trim()); }
-    const selI = fd.get('ans') == null ? -1 : +fd.get('ans'); const ch = []; let ans = null;
-    raw.forEach((t, i) => { if (t) { if (i === selI) ans = ch.length; ch.push(t); } });
+    const sel = fd.getAll('ans').map(Number); const ch = []; let ans = [];
+    raw.forEach((t, i) => { if (t) { if (sel.includes(i)) ans.push(ch.length); ch.push(t); } });
+    ans = ans.length === 0 ? null : ans.length === 1 ? ans[0] : ans;
     const cards = setCards(m.set).slice();
     const card = { id: m.idx != null ? cards[m.idx].id : uid(), q, ch: ch.length >= 2 ? ch : [], ans: ch.length >= 2 ? ans : null, a: String(fd.get('a') || '').trim(), exp: String(fd.get('exp') || '').trim(), src: String(fd.get('src') || '').trim() };
     if (m.idx != null) cards[m.idx] = card; else cards.push(card);
@@ -1231,7 +1293,7 @@ async function main() {
     await Store.init(g);
     const d = await Store.loadAll();
     if (d) {
-      S.nodes = d.prof.nodes || []; S.log = d.prof.log || {}; S.sets = d.sets; S.prog = d.prog;
+      S.nodes = d.prof.nodes || []; S.log = d.prof.log || {}; S.resume = d.prof.resume || {}; S.sets = d.sets; S.prog = d.prog;
       S.nodes.filter(n => n.type === 'set').forEach(n => { if (!S.sets[n.id]) S.sets[n.id] = { cards: [] }; });
     } else seedData();
     try { await Pub.initF(); } catch (e) { console.warn(e); }

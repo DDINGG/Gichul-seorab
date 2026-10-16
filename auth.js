@@ -1,4 +1,4 @@
-/* 기출 서랍 · 로그인 / 가입 승인 / 관리자 화면 (Supabase) */
+/* 서랍 · 로그인 / 가입 승인 / 관리자 화면 (Supabase) */
 (function () {
   'use strict';
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -8,7 +8,7 @@
 
   function screen(html) { app().innerHTML = `<div class="gate"><div class="gate-card">${html}</div></div>`; }
   const LOGO = '<svg viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true" width="28" height="28"><rect x="2.5" y="3" width="21" height="6" rx="1.5"/><rect x="2.5" y="10" width="21" height="6" rx="1.5"/><rect x="2.5" y="17" width="21" height="6" rx="1.5"/><path d="M10.5 6h5M10.5 13h5M10.5 20h5" stroke-linecap="round"/></svg>';
-  const head = (t, p) => `<div class="gate-logo">${LOGO}<b>기출 서랍</b></div><h1>${t}</h1><p class="muted">${p || ''}</p>`;
+  const head = (t, p) => `<div class="gate-logo">${LOGO}<b>서랍</b></div><h1>${t}</h1><p class="muted">${p || ''}</p>`;
 
   function showSetup() {
     screen(head('설정이 필요해요', '<code>config.js</code>에 Supabase 주소(URL)와 anon 키를 넣어 주세요.'));
